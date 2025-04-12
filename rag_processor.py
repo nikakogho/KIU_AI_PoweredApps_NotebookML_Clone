@@ -269,7 +269,7 @@ class RAGProcessor:
         # 2. Construct the prompt
         prompt = f"""
         You are an assistant answering questions based ONLY on the provided context and some common knowledge.
-        Try very hard to answer only with context and inference upon context.
+        Try very hard to answer only with context and inference upon context. Cite the exact place/places in text that talks about this.
         If the answer is not found by combination of context and inference and you had to instead rely on commond knowledge outside of it, say "I could not find the answer in the provided documents, but I can answer from common knowledge:" and proceed with answer.
 
         Context:
