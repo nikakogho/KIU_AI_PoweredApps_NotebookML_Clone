@@ -48,29 +48,23 @@ def upload_document():
     API endpoint to upload a document (txt or pdf).
     Processes the document and adds it to the vector store.
     """
-    print('Step 1')
     if rag_processor is None:
          return jsonify({"error": "RAG Processor not initialized"}), 500
 
-    print('Step 2')
     if request.files['file'] is None:
         return jsonify({"error": "No file part in the request"}), 400
 
-    print('Step 3')
     file = request.files['file']
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
 
-    print('Step 4')
     if file and allowed_file(file.filename):
         try:
-            print('Step 5')
             # Save the uploaded file temporarily
             filename = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
             file.save(filename)
             logging.info(f"File '{filename}' uploaded successfully.")
 
-            print('Step 6')
             # Process the document using the RAG Processor
             rag_processor.add_document(filename)
             logging.info(f"Document '{filename}' processed and added to vector store.")
@@ -78,7 +72,6 @@ def upload_document():
             # Optional: Remove the temp file after processing if desired
             # os.remove(filename)
 
-            print('Step 7')
             return jsonify({"message": f"Document '{file.filename}' uploaded and processed successfully."}), 200
 
         except Exception as e:
