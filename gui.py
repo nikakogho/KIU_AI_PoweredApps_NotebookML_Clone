@@ -10,7 +10,7 @@ import json # To parse JSON responses
 # --- Configuration ---
 # Make sure this matches the address your Flask backend is running on
 BACKEND_URL = "http://localhost:5000"
-
+BACKEND_HEARTBEAT_URL = f"{BACKEND_URL}/heartbeat"
 
 class RagAppGUI:
     """
@@ -69,7 +69,6 @@ class RagAppGUI:
         # --- Widgets ---
 
         # Top Frame Widgets
-        # *** Connect button command to the actual function ***
         self.upload_button = ttk.Button(self.top_frame, text="Upload File (.txt, .pdf)", command=self.select_and_upload_file)
         self.upload_button.grid(row=0, column=0, padx=(0, 10))
 
@@ -95,9 +94,11 @@ class RagAppGUI:
         # Bottom Frame Widgets
         self.query_entry = ttk.Entry(self.bottom_frame, width=60, font=("Helvetica", 10))
         self.query_entry.grid(row=0, column=0, padx=(0, 10), sticky="ew")
-        self.query_entry.bind("<Return>", self.send_query_placeholder) # Bind Enter key (placeholder for now)
+        # *** Bind Enter key to the actual function ***
+        self.query_entry.bind("<Return>", self.send_query)
 
-        self.send_button = ttk.Button(self.bottom_frame, text="Send", command=self.send_query_placeholder) # Placeholder for now
+        # *** Connect button command to the actual function ***
+        self.send_button = ttk.Button(self.bottom_frame, text="Send", command=self.send_query)
         self.send_button.grid(row=0, column=1)
         self.send_button.config(state=tk.DISABLED) # Start disabled until file is uploaded
 
@@ -112,6 +113,10 @@ class RagAppGUI:
 
     def select_and_upload_file(self):
         """Opens file dialog, updates label, and starts upload thread."""
+        if self.upload_button['state'] == tk.DISABLED:
+             self.update_status("Please wait for the current operation to complete.")
+             return # Avoid concurrent uploads
+
         self.update_status("Selecting file...")
         filepath = filedialog.askopenfilename(
             title="Select a Document",
@@ -144,7 +149,8 @@ class RagAppGUI:
         try:
             with open(filepath, 'rb') as f:
                 files = {'file': (filename, f)}
-                response = requests.post(self.backend_upload_url, files=files, timeout=120) # Add timeout
+                # Increased timeout for potentially large uploads/processing
+                response = requests.post(self.backend_upload_url, files=files, timeout=300)
                 response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
 
                 # Process successful response
@@ -191,6 +197,7 @@ class RagAppGUI:
             self.update_status(f"Successfully processed '{filename}'. Ready to chat.")
             self.add_message(f"'{filename}' processed successfully.", "status")
             self.send_button.config(state=tk.NORMAL) # Enable send button
+            self.query_entry.focus_set() # Set focus to query entry
         else:
             self.update_status(f"Failed to process '{filename}'. See details below.")
             self.add_message(message, "error") # Display the error message in chat
@@ -200,10 +207,10 @@ class RagAppGUI:
         self.upload_button.config(state=tk.NORMAL) # Re-enable upload button
 
 
-    # --- Query Methods (Placeholders for now) ---
+    # --- Query Methods ---
 
-    def send_query_placeholder(self, event=None): # Add event=None for key binding
-        """Placeholder for sending query logic."""
+    def send_query(self, event=None): # Add event=None for key binding
+        """Handles sending the query typed by the user."""
         if self.send_button['state'] == tk.DISABLED:
              self.update_status("Please wait for the current operation or upload a file first.")
              return
@@ -212,18 +219,91 @@ class RagAppGUI:
         if not query:
             return # Don't send empty messages
 
-        print(f"Sending query (placeholder): {query}")
-        self.add_message(f"You: {query}", "user") # Display user query
+        # Display user query immediately
+        self.add_message(f"You: {query}", "user")
         self.query_entry.delete(0, tk.END) # Clear input field
-        self.update_status("Placeholder: Query sent...")
-        self.send_button.config(state=tk.DISABLED) # Disable send while processing
-        self.query_entry.config(state=tk.DISABLED) # Disable entry while processing
 
-        # Simulate bot response
-        self.root.after(1000, lambda: self.add_message(f"Bot: Placeholder response to '{query}'", "bot"))
-        self.root.after(1000, lambda: self.update_status("Status: Ready"))
-        self.root.after(1000, lambda: self.send_button.config(state=tk.NORMAL)) # Re-enable
-        self.root.after(1000, lambda: self.query_entry.config(state=tk.NORMAL)) # Re-enable
+        # Update status and disable input widgets
+        self.update_status("Querying backend...")
+        self.send_button.config(state=tk.DISABLED)
+        self.query_entry.config(state=tk.DISABLED)
+        self.upload_button.config(state=tk.DISABLED) # Also disable upload during query
+
+        # Start background thread for backend communication
+        query_thread = threading.Thread(target=self._query_backend_thread, args=(query,), daemon=True)
+        query_thread.start()
+
+    def _query_backend_thread(self, query):
+        """
+        Sends the query to the backend in a background thread.
+
+        Args:
+            query (str): The user's query text.
+        """
+        try:
+            payload = {'query': query}
+            headers = {'Content-Type': 'application/json'}
+            # Increased timeout for potentially complex queries
+            response = requests.post(self.backend_query_url, json=payload, headers=headers, timeout=180)
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+
+            # Process successful response
+            try:
+                response_json = response.json()
+                answer = response_json.get("answer", "Backend returned success, but no answer found.")
+                # Schedule GUI update back on the main thread
+                self.root.after(0, self._update_gui_after_query, True, answer)
+            except json.JSONDecodeError:
+                 # Handle cases where response is not JSON
+                 self.root.after(0, self._update_gui_after_query, False, f"Query Error: Backend response was not valid JSON (Status {response.status_code}).")
+
+        except requests.exceptions.ConnectionError:
+            error_message = f"Query Error: Could not connect to the backend at {self.backend_query_url}. Is it running?"
+            self.root.after(0, self._update_gui_after_query, False, error_message)
+        except requests.exceptions.Timeout:
+             error_message = "Query Error: The request timed out while querying the backend."
+             self.root.after(0, self._update_gui_after_query, False, error_message)
+        except requests.exceptions.HTTPError as e:
+             # Handle specific HTTP errors reported by the backend
+             error_message = f"Query Error: Backend returned status {e.response.status_code}."
+             try:
+                 # Try to get error detail from backend JSON response
+                 error_detail = e.response.json().get("error", "No details provided.")
+                 error_message += f" Detail: {error_detail}"
+             except json.JSONDecodeError:
+                 error_message += " Could not parse error details from response."
+             self.root.after(0, self._update_gui_after_query, False, error_message)
+        except requests.exceptions.RequestException as e:
+            # Catch other potential requests errors
+            error_message = f"Query Error: An unexpected network error occurred: {e}"
+            self.root.after(0, self._update_gui_after_query, False, error_message)
+        except Exception as e:
+            # Catch other potential errors
+            error_message = f"Query Error: An unexpected error occurred: {e}"
+            self.root.after(0, self._update_gui_after_query, False, error_message)
+
+
+    def _update_gui_after_query(self, success, message):
+        """
+        Updates the GUI status and chat display after a query attempt.
+        This method is scheduled to run on the main GUI thread.
+        """
+        if success:
+            self.add_message(f"Bot: {message}", "bot")
+            self.update_status("Ready")
+        else:
+            self.add_message(message, "error") # Display the error message in chat
+            self.update_status("Error occurred during query.")
+
+        # Re-enable input widgets regardless of success/failure
+        # Only enable send if a file is still considered loaded
+        if self.current_file:
+             self.send_button.config(state=tk.NORMAL)
+        else:
+             self.send_button.config(state=tk.DISABLED)
+        self.query_entry.config(state=tk.NORMAL)
+        self.upload_button.config(state=tk.NORMAL) # Re-enable upload
+        self.query_entry.focus_set() # Set focus back to query entry
 
 
     # --- Utility Methods ---
@@ -232,11 +312,9 @@ class RagAppGUI:
         """Adds a message to the chat display with specified tag for styling."""
         self.chat_display.config(state='normal') # Enable editing
         # Add message and ensure separation with newlines
-        if not self.chat_display.get('1.0', tk.END).endswith('\n\n'):
-             # Add extra newline if needed before inserting
-             if not self.chat_display.get('1.0', tk.END).endswith('\n'):
-                 self.chat_display.insert(tk.END, '\n')
-             self.chat_display.insert(tk.END, '\n')
+        current_content = self.chat_display.get('1.0', tk.END).strip()
+        if current_content: # Add newline only if content exists
+             self.chat_display.insert(tk.END, '\n\n')
 
         self.chat_display.insert(tk.END, message, tag)
         self.chat_display.config(state='disabled') # Disable editing
@@ -255,18 +333,18 @@ if __name__ == "__main__":
     backend_ok = False
     try:
         # Simple check if backend root is reachable before starting GUI
-        ping_response = requests.get(BACKEND_URL, timeout=2)
+        ping_response = requests.get(BACKEND_HEARTBEAT_URL, timeout=2)
         if ping_response.status_code == 200 or ping_response.status_code == 404: # Allow 404 on root
-             print(f"Backend detected at {BACKEND_URL}")
+             print(f"Backend detected at {BACKEND_HEARTBEAT_URL}")
              backend_ok = True
         else:
-             print(f"Warning: Backend responded with status {ping_response.status_code} at {BACKEND_URL}")
+             print(f"Warning: Backend responded with status {ping_response.status_code} at {BACKEND_HEARTBEAT_URL}")
              # Decide if you want to proceed even if backend isn't fully responsive
              # backend_ok = True # Uncomment to proceed anyway
     except requests.exceptions.ConnectionError:
-        print(f"Error: Could not connect to backend at {BACKEND_URL}. Please ensure it's running.")
+        print(f"Error: Could not connect to backend at {BACKEND_HEARTBEAT_URL}. Please ensure it's running.")
     except requests.exceptions.Timeout:
-        print(f"Error: Connection to backend timed out ({BACKEND_URL}).")
+        print(f"Error: Connection to backend timed out ({BACKEND_HEARTBEAT_URL}).")
     except Exception as e:
         print(f"An unexpected error occurred during backend check: {e}")
 
@@ -277,5 +355,4 @@ if __name__ == "__main__":
     root.mainloop()
     # else: # Uncomment this block to enforce backend check
     #     print("Exiting GUI application because backend check failed.")
-
 
