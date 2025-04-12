@@ -264,11 +264,13 @@ class RAGProcessor:
             logging.info(f"Context built from sources: {sources}")
 
 
+        logging.info(f"Context for query: {context[:1000]}...") # Log first 1000 chars of context for brevity
+
         # 2. Construct the prompt
         prompt = f"""
-        You are an assistant answering questions based ONLY on the provided context.
-        If the answer is not found in the context, say "I could not find the answer in the provided documents."
-        Do not use any prior knowledge.
+        You are an assistant answering questions based ONLY on the provided context and some common knowledge.
+        Try very hard to answer only with context and inference upon context.
+        If the answer is not found by combination of context and inference and you had to instead rely on commond knowledge outside of it, say "I could not find the answer in the provided documents, but I can answer from common knowledge:" and proceed with answer.
 
         Context:
         ---
